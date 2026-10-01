@@ -95,10 +95,17 @@
 
   let state = "menu";
   let score = 0;
+  let best = 0;
   let lives = MAX_LIVES;
   let collectedStars = 0;
   let elapsed = 0;
   let difficulty = 1;
+
+  try {
+    best = parseInt(localStorage.getItem("turtleBest") || "0", 10) || 0;
+  } catch (err) {
+    best = 0;
+  }
 
   let turtle = null;
   let starPool = [];
@@ -249,6 +256,10 @@
 
   function gameOver() {
     state = "gameover";
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem("turtleBest", String(best)); } catch (err) {}
+    }
   }
 
   function hitPlayer() {
@@ -308,10 +319,10 @@
         const dx = pointer.x - turtle.x;
         const dy = pointer.y - turtle.y;
         const d = Math.hypot(dx, dy);
-        if (d > 6) {
-          const pull = Math.min(1600 * dt, d);
-          turtle.vx += (dx / d) * pull * 4 * dt;
-          turtle.vy += (dy / d) * pull * 4 * dt;
+        if (d > 4) {
+          const sp = Math.min(d * 5, 400);
+          turtle.vx = (dx / d) * sp;
+          turtle.vy = (dy / d) * sp;
         }
       }
 
@@ -604,7 +615,10 @@
 
     const collected = Math.min(collectedStars, TOTAL_STARS);
     ctx.fillStyle = "#ffe27a";
-    ctx.fillText("⭐ " + collected + " / " + TOTAL_STARS, 240, 26);
+    ctx.fillText("⭐ " + collected, 190, 26);
+
+    ctx.fillStyle = "#9fd8ff";
+    ctx.fillText("最佳 " + best, 320, 26);
 
     for (let i = 0; i < MAX_LIVES; i++) {
       drawHeart(760 - i * 34, 26, i < lives);
@@ -635,7 +649,7 @@
     ctx.fillText("海龟寻星", W / 2, 200);
     ctx.fillStyle = "#9fd8ff";
     ctx.font = "20px 'Segoe UI', 'PingFang SC', sans-serif";
-    ctx.fillText("收集 " + TOTAL_STARS + " 颗星星中的随机一部分 · 避开陨石", W / 2, 240);
+    ctx.fillText("躲避陨石，尽可能多地收集星星", W / 2, 240);
 
     drawButton(W / 2, 330, 240, 62, "开始游戏", "#3fae6c", "#2f9e5f");
 
@@ -660,7 +674,9 @@
     ctx.fillText("得分 " + score, W / 2, 240);
     ctx.fillStyle = "#ffe27a";
     ctx.font = "18px 'Segoe UI', 'PingFang SC', sans-serif";
-    ctx.fillText("共收集星星 " + collectedStars + " / " + TOTAL_STARS, W / 2, 276);
+    ctx.fillText("共收集星星 " + collectedStars, W / 2, 276);
+    ctx.fillStyle = "#9fd8ff";
+    ctx.fillText("最佳纪录 " + best + (score >= best ? "  ★ 新纪录！" : ""), W / 2, 306);
 
     drawButton(W / 2, 340, 240, 62, "重新开始", "#3fae6c", "#2f9e5f");
     ctx.textAlign = "left";
@@ -772,6 +788,7 @@
     window.__game = {
       get state() { return state; },
       get score() { return score; },
+      get best() { return best; },
       get lives() { return lives; },
       get collected() { return collectedStars; },
       get meteorCount() { return meteors.length; },
