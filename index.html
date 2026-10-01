@@ -32,6 +32,7 @@
     border-radius: 14px;
     box-shadow: 0 20px 60px rgba(0,0,0,0.6);
     background: #04203f;
+    touch-action: none;
   }
   #hint {
     position: fixed;
@@ -724,21 +725,27 @@
   }
 
   const pointer = { x: 0, y: 0, active: false };
-  function onPointerDown(e) {
+  function getClient(e) {
+    if (e.touches && e.touches.length > 0) {
+      return { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
+    }
+    return { clientX: e.clientX, clientY: e.clientY };
+  }
+  function onDown(e) {
     audio.ensure();
-    const p = toGame(e);
+    const p = toGame(getClient(e));
     pointer.x = p.x;
     pointer.y = p.y;
     pointer.active = true;
     if (state === "menu" && insideButton(p, W / 2, 330, 240, 62)) startGame();
     else if (state === "gameover" && insideButton(p, W / 2, 340, 240, 62)) startGame();
   }
-  function onPointerMove(e) {
-    const p = toGame(e);
+  function onMove(e) {
+    const p = toGame(getClient(e));
     pointer.x = p.x;
     pointer.y = p.y;
   }
-  function onPointerUp() {
+  function onUp() {
     pointer.active = false;
   }
 
@@ -746,10 +753,20 @@
     return p.x >= x - w / 2 && p.x <= x + w / 2 && p.y >= y - h / 2 && p.y <= y + h / 2;
   }
 
-  canvas.addEventListener("pointerdown", onPointerDown);
-  canvas.addEventListener("pointermove", onPointerMove);
-  window.addEventListener("pointerup", onPointerUp);
-  window.addEventListener("pointercancel", onPointerUp);
+  canvas.addEventListener("mousedown", onDown);
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+
+  canvas.addEventListener("touchstart", function (e) {
+    e.preventDefault();
+    onDown(e);
+  }, { passive: false });
+  canvas.addEventListener("touchmove", function (e) {
+    e.preventDefault();
+    onMove(e);
+  }, { passive: false });
+  window.addEventListener("touchend", onUp);
+  window.addEventListener("touchcancel", onUp);
 
   window.addEventListener("keydown", function (e) {
     const k = e.key.toLowerCase();
