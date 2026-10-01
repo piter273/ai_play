@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>海龟寻星 · Turtle Star Collector</title>
+<style>
+  :root {
+    --bg1: #0a1a3a;
+    --bg2: #020816;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: radial-gradient(circle at 50% 30%, var(--bg1), var(--bg2));
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  #stage {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  canvas {
+    display: block;
+    border-radius: 14px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+    background: #04203f;
+  }
+  #hint {
+    position: fixed;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: #9fd8ff;
+    font-size: 13px;
+    letter-spacing: 1px;
+    opacity: 0.7;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game"></canvas>
+</div>
+<div id="hint">方向键 / WASD 移动 · 触摸拖拽移动 · 收集星星，避开陨石</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const W = 800;
+  const H = 600;
+  const TOTAL_STARS = 4469;
+  const ACTIVE_STAR_COUNT = 12;
+  const MAX_LIVES = 3;
+
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  let scale = 1;
+  function fitCanvas() {
+    const pad = 16;
+    const availW = window.innerWidth - pad;
+    const availH = window.innerHeight - pad;
+    scale = Math.min(availW / W, availH / H);
+    canvas.style.width = (W * scale) + "px";
+    canvas.style.height = (H * scale) + "px";
+  }
+  window.addEventListener("resize", fitCanvas);
+  fitCanvas();
+
+  function toGame(e) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - r.left) / r.width * W,
+      y: (e.clientY - r.top) / r.height * H
+    };
+  }
+
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+
+  let state = "menu";
+  let score = 0;
+  let lives = MAX_LIVES;
+  let collectedStars = 0;
+  let elapsed = 0;
+  let difficulty = 1;
+
+  let turtle = null;
+  let starPool = [];
+  let activeStars = [];
+  let meteors = [];
+  let bubbles = [];
+  let particles = [];
+  let keys = {};
+
+  const audio = {
+    ctx: null,
+    enabled: false,
+    ensure() {
+      if (this.ctx) return;
+      try {
+        this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+        this.enabled = true;
+      } catch (err) {
+        this.enabled = false;
+      }
+    },
+    beep(freq, dur, type, vol) {
+      if (!this.enabled || !this.ctx) return;
+      try {
+        const o = this.ctx.createOscillator();
+        const g = this.ctx.createGain();
+        o.type = type || "sine";
+        o.frequency.value = freq;
+        g.gain.value = vol || 0.12;
+        g.gain.setValueAtTime(vol || 0.12, this.ctx.currentTime);
+        g.gain.exponentialRampToValueAtTime(0.0001, this.ctx.currentTime + dur);
+        o.connect(g);
+        g.connect(this.ctx.destination);
+        o.start();
+        o.stop(this.ctx.currentTime + dur);
+      } catch (err) {}
+    },
+    collect() {
+      this.beep(880, 0.18, "sine", 0.14);
+      setTimeout(() => this.beep(1320, 0.18, "sine", 0.1), 60);
+    },
+    hit() {
+      this.beep(160, 0.3, "sawtooth", 0.18);
+    },
+    start() {
+      this.beep(523, 0.12, "sine", 0.12);
+      setTimeout(() => this.beep(784, 0.14, "sine", 0.12), 90);
+    }
+  };
+
+  function makeStarPool() {
+    starPool = [];
+    for (let i = 0; i < TOTAL_STARS; i++) {
+      starPool.push({
+        x: rand(10, W - 10),
+        y: rand(10, H - 10),
+        r: rand(0.6, 1.6),
+        phase: rand(0, Math.PI * 2),
+        twinkle: rand(0.5, 2.0)
+      });
+    }
+  }
+
+  function pickActiveStars() {
+    activeStars = [];
+    const used = new Set();
+    while (activeStars.length < ACTIVE_STAR_COUNT) {
+      const idx = Math.floor(Math.random() * starPool.length);
+      if (!used.has(idx)) {
+        used.add(idx);
+        activeStars.push(idx);
+      }
+    }
+  }
+
+  function makeBubbles(n) {
+    bubbles = [];
+    for (let i = 0; i < n; i++) {
+      bubbles.push({
+        x: rand(0, W),
+        y: rand(0, H),
+        r: rand(1.5, 5),
+        speed: rand(8, 30),
+        drift: rand(-6, 6),
+        phase: rand(0, Math.PI * 2)
+      });
+    }
+  }
+
+  function spawnMeteor() {
+    const r = rand(12, 26);
+    const verts = [];
+    const n = Math.floor(rand(6, 9));
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const rr = r * rand(0.72, 1.12);
+      verts.push({ a, rr });
+    }
+    meteors.push({
+      x: rand(r, W - r),
+      y: -r - 10,
+      r,
+      verts,
+      vx: rand(-24, 24),
+      vy: rand(70, 120) * difficulty,
+      rot: rand(0, Math.PI * 2),
+      vrot: rand(-2, 2),
+      craters: (function () {
+        const c = [];
+        const cn = Math.floor(rand(2, 4));
+        for (let i = 0; i < cn; i++) {
+          c.push({ a: rand(0, Math.PI * 2), d: rand(0.1, 0.45) * r, cr: rand(0.15, 0.3) * r });
+        }
+        return c;
+      })()
+    });
+  }
+
+  function resetGame() {
+    turtle = {
+      x: W / 2,
+      y: H - 100,
+      vx: 0,
+      vy: 0,
+      angle: 0,
+      flip: 1,
+      flipper: 0,
+      invuln: 0
+    };
+    makeStarPool();
+    pickActiveStars();
+    makeBubbles(70);
+    meteors = [];
+    particles = [];
+    score = 0;
+    lives = MAX_LIVES;
+    collectedStars = 0;
+    elapsed = 0;
+    difficulty = 1;
+  }
+
+  function startGame() {
+    audio.ensure();
+    audio.start();
+    resetGame();
+    state = "playing";
+  }
+
+  function gameOver() {
+    state = "gameover";
+  }
+
+  function hitPlayer() {
+    if (state !== "playing" || turtle.invuln > 0) return;
+    lives--;
+    audio.hit();
+    turtle.invuln = 2.0;
+    burst(turtle.x, turtle.y, "#ff9a5a", 14);
+    if (lives <= 0) {
+      lives = 0;
+      gameOver();
+    }
+  }
+
+  function collectStar(idx) {
+    if (state !== "playing") return;
+    const s = starPool[idx];
+    collectedStars++;
+    score += 10;
+    audio.collect();
+    burst(s.x, s.y, "#ffe27a", 12);
+    const used = new Set(activeStars);
+    let next;
+    do {
+      next = Math.floor(Math.random() * starPool.length);
+    } while (used.has(next));
+    activeStars[activeStars.indexOf(idx)] = next;
+  }
+
+  function burst(x, y, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = rand(0, Math.PI * 2);
+      const sp = rand(40, 160);
+      particles.push({
+        x, y,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp,
+        life: rand(0.4, 0.8),
+        t: 0,
+        color,
+        r: rand(2, 5)
+      });
+    }
+  }
+
+  function update(dt) {
+    elapsed += dt;
+    difficulty = 1 + Math.min(elapsed / 60, 2.0);
+
+    if (state === "playing") {
+      if (keys.left || keys.a) turtle.vx -= 900 * dt;
+      if (keys.right || keys.d) turtle.vx += 900 * dt;
+      if (keys.up || keys.w) turtle.vy -= 900 * dt;
+      if (keys.down || keys.s) turtle.vy += 900 * dt;
+
+      if (pointer.active) {
+        const dx = pointer.x - turtle.x;
+        const dy = pointer.y - turtle.y;
+        const d = Math.hypot(dx, dy);
+        if (d > 6) {
+          const pull = Math.min(1600 * dt, d);
+          turtle.vx += (dx / d) * pull * 4 * dt;
+          turtle.vy += (dy / d) * pull * 4 * dt;
+        }
+      }
+
+      turtle.vx *= Math.pow(0.0005, dt);
+      turtle.vy *= Math.pow(0.0005, dt);
+      turtle.x += turtle.vx * dt;
+      turtle.y += turtle.vy * dt;
+      turtle.x = clamp(turtle.x, 26, W - 26);
+      turtle.y = clamp(turtle.y, 34, H - 30);
+
+      if (Math.abs(turtle.vx) > 12) turtle.flip = turtle.vx > 0 ? 1 : -1;
+      turtle.angle = clamp(turtle.vy * 0.0006, -0.5, 0.5);
+      turtle.flipper += dt * 8;
+      if (turtle.invuln > 0) turtle.invuln -= dt;
+
+      for (let i = 0; i < activeStars.length; i++) {
+        const s = starPool[activeStars[i]];
+        const dx = turtle.x - s.x;
+        const dy = turtle.y - s.y;
+        const rr = 24 + 14;
+        if (dx * dx + dy * dy < rr * rr) collectStar(activeStars[i]);
+      }
+
+      const spawnChance = (0.5 + difficulty * 0.35) * dt;
+      if (Math.random() < spawnChance) spawnMeteor();
+
+      for (let i = meteors.length - 1; i >= 0; i--) {
+        const m = meteors[i];
+        m.x += m.vx * dt;
+        m.y += m.vy * dt;
+        m.rot += m.vrot * dt;
+        if (m.y - m.r > H + 20) {
+          meteors.splice(i, 1);
+          continue;
+        }
+        const dx = turtle.x - m.x;
+        const dy = turtle.y - m.y;
+        const rr = 20 + m.r;
+        if (dx * dx + dy * dy < rr * rr) {
+          meteors.splice(i, 1);
+          hitPlayer();
+        }
+      }
+    }
+
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const b = bubbles[i];
+      b.y -= b.speed * dt;
+      b.x += Math.sin(elapsed * 2 + b.phase) * b.drift * dt;
+      if (b.y < -10) {
+        b.y = H + 10;
+        b.x = rand(0, W);
+      }
+    }
+
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.t += dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= Math.pow(0.02, dt);
+      p.vy *= Math.pow(0.02, dt);
+      if (p.t >= p.life) particles.splice(i, 1);
+    }
+  }
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#062b57");
+    g.addColorStop(0.55, "#04345f");
+    g.addColorStop(1, "#02162e");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.save();
+    ctx.globalAlpha = 0.06;
+    for (let i = 0; i < 4; i++) {
+      const bx = 120 + i * 180 + Math.sin(elapsed * 0.3 + i) * 20;
+      const grd = ctx.createLinearGradient(bx, 0, bx - 90, H);
+      grd.addColorStop(0, "rgba(180,230,255,0.9)");
+      grd.addColorStop(1, "rgba(180,230,255,0)");
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.moveTo(bx, 0);
+      ctx.lineTo(bx - 90, H);
+      ctx.lineTo(bx - 30, H);
+      ctx.lineTo(bx + 60, 0);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  function drawStar(x, y, r, color, glow) {
+    ctx.save();
+    ctx.translate(x, y);
+    if (glow) {
+      const g = ctx.createRadialGradient(0, 0, r * 0.2, 0, 0, r * 2.6);
+      g.addColorStop(0, "rgba(255,225,130,0.55)");
+      g.addColorStop(1, "rgba(255,225,130,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(0, 0, r * 2.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    const spikes = 5;
+    for (let i = 0; i < spikes * 2; i++) {
+      const rad = i % 2 === 0 ? r : r * 0.45;
+      const a = -Math.PI / 2 + (i * Math.PI) / spikes;
+      const px = Math.cos(a) * rad;
+      const py = Math.sin(a) * rad;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawStars() {
+    ctx.save();
+    for (let i = 0; i < starPool.length; i++) {
+      const s = starPool[i];
+      const tw = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(elapsed * s.twinkle + s.phase));
+      ctx.fillStyle = "rgba(190,225,255," + (0.12 + 0.25 * tw).toFixed(3) + ")";
+      ctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+    ctx.restore();
+
+    for (const idx of activeStars) {
+      const s = starPool[idx];
+      const pulse = 1 + 0.15 * Math.sin(elapsed * 4 + s.phase);
+      drawStar(s.x, s.y, 12 * pulse, "#ffd766", true);
+      drawStar(s.x, s.y, 6 * pulse, "#fff3c4", false);
+    }
+  }
+
+  function drawTurtle() {
+    if (!turtle) return;
+    const t = turtle;
+    ctx.save();
+    ctx.translate(t.x, t.y);
+    ctx.rotate(t.angle);
+    ctx.scale(t.flip, 1);
+
+    if (t.invuln > 0 && Math.floor(t.invuln * 10) % 2 === 0) {
+      ctx.globalAlpha = 0.35;
+    }
+
+    const fl = Math.sin(t.flipper) * 0.5;
+
+    ctx.fillStyle = "#2f9e5f";
+    for (let i = 0; i < 4; i++) {
+      const side = i < 2 ? -1 : 1;
+      const idx = i % 2;
+      const fx = side * 16;
+      const fy = -4 + idx * 22;
+      ctx.save();
+      ctx.translate(fx, fy);
+      ctx.rotate(fl * (i % 2 === 0 ? 1 : -1) * 0.7);
+      ctx.beginPath();
+      ctx.ellipse(side * 8, 0, 13, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.beginPath();
+    ctx.ellipse(0, 4, 26, 20, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#3fae6c";
+    ctx.fill();
+    ctx.strokeStyle = "#1f6e42";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.ellipse(0, 4, 16, 12, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#57c57f";
+    ctx.fill();
+
+    ctx.fillStyle = "#2f9e5f";
+    ctx.beginPath();
+    ctx.moveTo(0, 4);
+    ctx.lineTo(-14, -8);
+    ctx.lineTo(0, -10);
+    ctx.lineTo(14, -8);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "#57c57f";
+    ctx.beginPath();
+    ctx.arc(24, -4, 11, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(28, -7, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#0a1a2a";
+    ctx.beginPath();
+    ctx.arc(29, -7, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(-22, 8);
+    ctx.lineTo(-32, 14);
+    ctx.lineTo(-20, 14);
+    ctx.closePath();
+    ctx.fillStyle = "#2f9e5f";
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawMeteor(m) {
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    ctx.rotate(m.rot);
+
+    const g = ctx.createRadialGradient(0, 0, m.r * 0.2, 0, 0, m.r * 1.9);
+    g.addColorStop(0, "rgba(255,150,60,0.35)");
+    g.addColorStop(1, "rgba(255,150,60,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(0, 0, m.r * 1.9, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.beginPath();
+    m.verts.forEach((v, i) => {
+      const px = Math.cos(v.a) * v.rr;
+      const py = Math.sin(v.a) * v.rr;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    });
+    ctx.closePath();
+    ctx.fillStyle = "#7a6a58";
+    ctx.fill();
+    ctx.strokeStyle = "#4a3f33";
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    ctx.fillStyle = "#5f5142";
+    for (const c of m.craters) {
+      ctx.beginPath();
+      ctx.arc(Math.cos(c.a) * c.d, Math.sin(c.a) * c.d, c.cr, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.fillStyle = "rgba(255,190,120,0.5)";
+    ctx.beginPath();
+    ctx.arc(m.r * 0.35, -m.r * 0.35, m.r * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  function drawParticles() {
+    for (const p of particles) {
+      const a = 1 - p.t / p.life;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r * a, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawBubbles() {
+    ctx.save();
+    for (const b of bubbles) {
+      ctx.globalAlpha = 0.25;
+      ctx.strokeStyle = "#bfe6ff";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawHUD() {
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(0, 0, W, 52);
+
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 20px 'Segoe UI', 'PingFang SC', sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText("得分 " + score, 20, 26);
+
+    const collected = Math.min(collectedStars, TOTAL_STARS);
+    ctx.fillStyle = "#ffe27a";
+    ctx.fillText("⭐ " + collected + " / " + TOTAL_STARS, 240, 26);
+
+    for (let i = 0; i < MAX_LIVES; i++) {
+      drawHeart(760 - i * 34, 26, i < lives);
+    }
+    ctx.restore();
+  }
+
+  function drawHeart(x, y, filled) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = filled ? "#ff5a7a" : "rgba(255,255,255,0.25)";
+    ctx.beginPath();
+    ctx.moveTo(0, 6);
+    ctx.bezierCurveTo(-12, -4, -6, -14, 0, -6);
+    ctx.bezierCurveTo(6, -14, 12, -4, 0, 6);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawMenu() {
+    ctx.save();
+    ctx.fillStyle = "rgba(2,10,24,0.66)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffe27a";
+    ctx.font = "bold 46px 'Segoe UI', 'PingFang SC', sans-serif";
+    ctx.fillText("海龟寻星", W / 2, 200);
+    ctx.fillStyle = "#9fd8ff";
+    ctx.font = "20px 'Segoe UI', 'PingFang SC', sans-serif";
+    ctx.fillText("收集 " + TOTAL_STARS + " 颗星星中的随机一部分 · 避开陨石", W / 2, 240);
+
+    drawButton(W / 2, 330, 240, 62, "开始游戏", "#3fae6c", "#2f9e5f");
+
+    ctx.fillStyle = "#bfe6ff";
+    ctx.font = "15px 'Segoe UI', 'PingFang SC', sans-serif";
+    ctx.fillText("方向键 / WASD 或触摸拖拽移动", W / 2, 440);
+    ctx.textAlign = "left";
+    ctx.restore();
+  }
+
+  function drawGameOver() {
+    ctx.save();
+    ctx.fillStyle = "rgba(2,10,24,0.72)";
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff8a8a";
+    ctx.font = "bold 44px 'Segoe UI', 'PingFang SC', sans-serif";
+    ctx.fillText("游戏结束", W / 2, 190);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "22px 'Segoe UI', 'PingFang SC', sans-serif";
+    ctx.fillText("得分 " + score, W / 2, 240);
+    ctx.fillStyle = "#ffe27a";
+    ctx.font = "18px 'Segoe UI', 'PingFang SC', sans-serif";
+    ctx.fillText("共收集星星 " + collectedStars + " / " + TOTAL_STARS, W / 2, 276);
+
+    drawButton(W / 2, 340, 240, 62, "重新开始", "#3fae6c", "#2f9e5f");
+    ctx.textAlign = "left";
+    ctx.restore();
+  }
+
+  function drawButton(x, y, w, h, text, fill, fillDown) {
+    const hover = pointer.active && pointer.x >= x - w / 2 && pointer.x <= x + w / 2 &&
+      pointer.y >= y - h / 2 && pointer.y <= y + h / 2;
+    ctx.save();
+    ctx.fillStyle = hover ? fillDown : fill;
+    ctx.shadowColor = "rgba(0,0,0,0.4)";
+    ctx.shadowBlur = 12;
+    ctx.beginPath();
+    roundRect(x - w / 2, y - h / 2, w, h, 14);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold 24px 'Segoe UI', 'PingFang SC', sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, x, y + 1);
+    ctx.restore();
+  }
+
+  function roundRect(x, y, w, h, r) {
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function draw() {
+    drawBackground();
+    drawStars();
+    drawBubbles();
+    for (const m of meteors) drawMeteor(m);
+    drawTurtle();
+    drawParticles();
+    if (state === "playing" || state === "gameover") drawHUD();
+    if (state === "menu") drawMenu();
+    if (state === "gameover") drawGameOver();
+  }
+
+  const pointer = { x: 0, y: 0, active: false };
+  function onPointerDown(e) {
+    audio.ensure();
+    const p = toGame(e);
+    pointer.x = p.x;
+    pointer.y = p.y;
+    pointer.active = true;
+    if (state === "menu" && insideButton(p, W / 2, 330, 240, 62)) startGame();
+    else if (state === "gameover" && insideButton(p, W / 2, 340, 240, 62)) startGame();
+  }
+  function onPointerMove(e) {
+    const p = toGame(e);
+    pointer.x = p.x;
+    pointer.y = p.y;
+  }
+  function onPointerUp() {
+    pointer.active = false;
+  }
+
+  function insideButton(p, x, y, w, h) {
+    return p.x >= x - w / 2 && p.x <= x + w / 2 && p.y >= y - h / 2 && p.y <= y + h / 2;
+  }
+
+  canvas.addEventListener("pointerdown", onPointerDown);
+  canvas.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerUp);
+
+  window.addEventListener("keydown", function (e) {
+    const k = e.key.toLowerCase();
+    keys[k] = true;
+    if (e.key === "ArrowLeft") keys.left = true;
+    if (e.key === "ArrowRight") keys.right = true;
+    if (e.key === "ArrowUp") keys.up = true;
+    if (e.key === "ArrowDown") keys.down = true;
+    if ((e.key === " " || e.key === "Enter") && state === "menu") startGame();
+    if ((e.key === " " || e.key === "Enter" || e.key === "r") && state === "gameover") startGame();
+    if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " "].includes(e.key)) e.preventDefault();
+  });
+  window.addEventListener("keyup", function (e) {
+    const k = e.key.toLowerCase();
+    keys[k] = false;
+    if (e.key === "ArrowLeft") keys.left = false;
+    if (e.key === "ArrowRight") keys.right = false;
+    if (e.key === "ArrowUp") keys.up = false;
+    if (e.key === "ArrowDown") keys.down = false;
+  });
+
+  resetGame();
+
+  let last = performance.now();
+  function loop(now) {
+    let dt = (now - last) / 1000;
+    last = now;
+    if (dt > 0.05) dt = 0.05;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  if (typeof window !== "undefined") {
+    window.__game = {
+      get state() { return state; },
+      get score() { return score; },
+      get lives() { return lives; },
+      get collected() { return collectedStars; },
+      get meteorCount() { return meteors.length; },
+      get starPoolSize() { return starPool.length; },
+      get activeStarCount() { return activeStars.length; },
+      start: startGame,
+      reset: resetGame,
+      hit: hitPlayer,
+      collectFirst: () => collectStar(activeStars[0])
+    };
+  }
+})();
+</script>
+</body>
+</html>
